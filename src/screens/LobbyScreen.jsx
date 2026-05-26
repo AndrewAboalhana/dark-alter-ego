@@ -12,6 +12,7 @@ const LEVEL_OPTIONS = [
 ]
 
 const Q_PER_GAME_OPTIONS = [5, 7, 10]
+const TIMER_OPTIONS = [20, 30, 45, 60]
 
 export default function LobbyScreen() {
   const { room, myPlayer, profile, goTo, setRoom } = useGame()
@@ -19,6 +20,7 @@ export default function LobbyScreen() {
   const [copied, setCopied] = useState(false)
   const [levelFilter, setLevelFilter] = useState(room?.level_filter || 0)
   const [questionsPerGame, setQuestionsPerGame] = useState(room?.questions_per_game || 7)
+  const [timerSeconds, setTimerSeconds] = useState(room?.timer_seconds || 30)
   const [questionsCount, setQuestionsCount] = useState(null)
   const isHost = room?.host_id === profile?.id
 
@@ -101,6 +103,7 @@ export default function LobbyScreen() {
       current_question_id: questions[0].id,
       level_filter: levelFilter,
       questions_per_game: actualQCount,
+      timer_seconds: timerSeconds,
     }).eq('id', room.id)
   }
 
@@ -218,7 +221,34 @@ export default function LobbyScreen() {
         </div>
       )}
 
-      {/* Non-host sees the chosen level & count */}
+      {/* Timer selector — host only */}
+      {isHost && (
+        <div style={s.section}>
+          <p style={s.sectionLabel}>⏱ وقت كل سؤال</p>
+          <div style={s.qRow}>
+            {TIMER_OPTIONS.map(t => {
+              const active = timerSeconds === t
+              return (
+                <button
+                  key={t}
+                  style={{
+                    ...s.qBtn,
+                    borderColor: active ? '#00F5A0' : '#ffffff15',
+                    background: active ? '#00F5A022' : '#0D0D14',
+                    color: active ? '#00F5A0' : '#6A6A9A',
+                  }}
+                  onClick={() => setTimerSeconds(t)}
+                >
+                  <span style={{ fontSize: 20, fontWeight: 900 }}>{t}</span>
+                  <span style={{ fontSize: 10 }}>ثانية</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Non-host sees the chosen settings */}
       {!isHost && (
         <div style={s.guestInfo}>
           <div style={s.guestInfoRow}>
@@ -232,6 +262,12 @@ export default function LobbyScreen() {
             <span style={{ color: '#6A6A9A', fontSize: 13 }}>عدد الأسئلة: </span>
             <span style={{ fontWeight: 700, color: '#EEEEFF', fontSize: 13 }}>
               {room?.questions_per_game || 7} أسئلة
+            </span>
+          </div>
+          <div style={s.guestInfoRow}>
+            <span style={{ color: '#6A6A9A', fontSize: 13 }}>وقت كل سؤال: </span>
+            <span style={{ fontWeight: 700, color: '#00F5A0', fontSize: 13 }}>
+              ⏱ {room?.timer_seconds || 30} ثانية
             </span>
           </div>
         </div>

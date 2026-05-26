@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useGame } from '../context/GameContext'
 import { supabase } from '../lib/supabase'
 import { C, LEVEL_CONFIG, getEvilLevel } from '../lib/theme'
 import { getAnswersForQuestion, calcEvilGain } from '../lib/questions'
+
+const TIMER_DEFAULT = 30
 
 export default function GameScreen() {
   const { room, myPlayer, profile, goTo, setRoom } = useGame()
@@ -12,7 +14,7 @@ export default function GameScreen() {
   const [myAnswer, setMyAnswer] = useState(null)
   const [customText, setCustomText] = useState('')
   const [phase, setPhase] = useState('answering') // answering | voting | reveal
-  const [timeLeft, setTimeLeft] = useState(30)
+  const [timeLeft, setTimeLeft] = useState(room?.timer_seconds || TIMER_DEFAULT)
   const [cardFlipped, setCardFlipped] = useState(false)
   const [messages, setMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
@@ -21,61 +23,77 @@ export default function GameScreen() {
   const [friendRequests, setFriendRequests] = useState([])
   const timerRef = useRef(null)
   const chatEndRef = useRef(null)
-  // Ref so the timer callback always sees the latest myAnswer
+  // Always reflects latest myAnswer so timer callback sees it (stale closure fix)
   const myAnswerRef = useRef(null)
   useEffect(() => { myAnswerRef.current = myAnswer }, [myAnswer])
 
+  // ── Main subscription effect ──────────────────────────────────────────────────
   useEffect(() => {
     if (!room) return
+    // Reset state for this question
+    setPhase('answering')
+    setCardFlipped(false)
+    setMyAnswer(null)
+    myAnswerRef.current = null
+    setAnswers([])
+    setCustomText('')
+    setTimeLeft(room.timer_seconds || TIMER_DEFAULT)
+
     fetchCurrentQuestion()
     fetchPlayers()
     fetchAnswers()
     fetchMessages()
 
     const channel = supabase
-      .channel(`game:${room.id}:${room.current_question_id}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${room.id}` }, ({ new: r }) => {
+      .channel(`game:${room.id}:v2:${room.current_question_id}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${room.id}`,
+      }, ({ new: r }) => {
         setRoom(r)
         if (r.status === 'finished') { goTo('result'); return }
         if (r.current_question_id !== room.current_question_id) {
+          // New question — reset everything
           fetchCurrentQuestion(r.current_question_id)
           setMyAnswer(null)
           myAnswerRef.current = null
           setAnswers([])
           setPhase('answering')
           setCardFlipped(false)
-          setTimeLeft(30)
+          setTimeLeft(r.timer_seconds || TIMER_DEFAULT) // use host-set timer
           setCustomText('')
         }
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'answers', filter: `room_id=eq.${room.id}` }, fetchAnswers)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${room.id}` }, fetchMessages)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes', filter: `room_id=eq.${room.id}` }, fetchAnswers)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'answers', filter: `room_id=eq.${room.id}`,
+      }, () => fetchAnswers())
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${room.id}`,
+      }, fetchMessages)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'votes', filter: `room_id=eq.${room.id}`,
+      }, () => fetchAnswers())
       .subscribe()
 
     return () => supabase.removeChannel(channel)
-  }, [room?.id, room?.current_question_id])
+  }, [room?.id, room?.current_question_id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Timer — counts down, auto-submits if player hasn't answered
+  // ── Timer countdown (starts when card is flipped) ─────────────────────────────
   useEffect(() => {
     if (phase !== 'answering' || !cardFlipped) return
+    clearInterval(timerRef.current)
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
-        if (t <= 1) {
-          clearInterval(timerRef.current)
-          return 0
-        }
+        if (t <= 1) { clearInterval(timerRef.current); return 0 }
         return t - 1
       })
     }, 1000)
     return () => clearInterval(timerRef.current)
   }, [phase, cardFlipped])
 
-  // Auto-submit first option when timer expires (so every player has an answer)
+  // ── On timeout: submit "no answer" (empty text) — no forced pick ──────────────
   useEffect(() => {
     if (timeLeft === 0 && phase === 'answering' && cardFlipped && !myAnswerRef.current && question) {
-      const opts = getPresetAnswers(question)
-      submitAnswer(opts[0], 0, false, true) // isTimeout=true → minimal evil
+      submitAnswer('', null, false, true) // empty = didn't answer
     }
   }, [timeLeft]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -83,60 +101,101 @@ export default function GameScreen() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // ── Data fetchers ─────────────────────────────────────────────────────────────
   const fetchCurrentQuestion = async (qId) => {
     const id = qId || room?.current_question_id
     if (!id) return
     const { data } = await supabase.from('questions').select('*').eq('id', id).single()
     setQuestion(data)
-    if (data) setTimeLeft(LEVEL_CONFIG[data.level]?.time || 30)
+    // Timer duration comes from room.timer_seconds, not question level
   }
-  const fetchPlayers  = async () => {
+
+  const fetchPlayers = async () => {
     const { data } = await supabase.from('room_players').select('*').eq('room_id', room.id)
     setPlayers(data || [])
   }
-  const fetchAnswers  = async () => {
-    const { data } = await supabase.from('answers').select('*, votes(count)').eq('room_id', room.id).eq('question_id', room.current_question_id)
-    setAnswers(data || [])
-  }
+
+  /**
+   * Fetch answers AND sync phase for ALL clients.
+   * Phase transitions happen here so every player moves together, not just the
+   * one who triggers the event.
+   */
+  const fetchAnswers = useCallback(async () => {
+    const [{ data: answersData }, { count: playerCount }] = await Promise.all([
+      supabase
+        .from('answers')
+        .select('*, votes(count)')
+        .eq('room_id', room.id)
+        .eq('question_id', room.current_question_id),
+      supabase
+        .from('room_players')
+        .select('id', { count: 'exact', head: true })
+        .eq('room_id', room.id),
+    ])
+
+    const allAnswers = answersData || []
+    setAnswers(allAnswers)
+
+    // All players have a record (answered OR timed-out) → move to voting
+    if (playerCount > 0 && allAnswers.length >= playerCount) {
+      setPhase(prev => prev === 'answering' ? 'voting' : prev)
+    }
+
+    // Any vote was cast → everyone moves to reveal
+    if (allAnswers.some(a => (a.votes?.[0]?.count || 0) > 0)) {
+      setPhase(prev => (prev === 'answering' || prev === 'voting') ? 'reveal' : prev)
+    }
+  }, [room?.id, room?.current_question_id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const fetchMessages = async () => {
-    const { data } = await supabase.from('messages').select('*').eq('room_id', room.id).order('created_at', { ascending: true }).limit(50)
+    const { data } = await supabase
+      .from('messages').select('*').eq('room_id', room.id)
+      .order('created_at', { ascending: true }).limit(50)
     setMessages(data || [])
   }
 
-  // Prefer DB answer_options; fall back to generated pool
+  // ── Prefer DB answer_options; fall back to generated pool ─────────────────────
   const getPresetAnswers = (q) =>
     q?.answer_options?.length >= 4 ? q.answer_options : getAnswersForQuestion(q)
 
-  // answerIdx: 0-3 for preset A-D, -1 for custom, -2 for timeout
-  const submitAnswer = async (text, answerIdx = 0, isCustom = false, isTimeout = false) => {
+  // ── Submit answer ─────────────────────────────────────────────────────────────
+  const submitAnswer = async (text, answerIdx = null, isCustom = false, isTimeout = false) => {
     if (myAnswerRef.current || !question) return
+    clearInterval(timerRef.current)
+
     const weight = question.level || 1
     const { data } = await supabase.from('answers').insert({
-      room_id: room.id, question_id: question.id, player_id: myPlayer.id,
-      answer_text: text, is_custom: isCustom, evil_weight: weight,
+      room_id: room.id,
+      question_id: question.id,
+      player_id: myPlayer.id,
+      answer_text: text || null, // null for no-answer (timeout)
+      is_custom: isCustom,
+      evil_weight: weight,
     }).select().single()
 
     if (!data) return
     setMyAnswer(data)
     myAnswerRef.current = data
-    clearInterval(timerRef.current)
-    setEvilScore(prev => Math.min(100, prev + calcEvilGain(weight, answerIdx, isCustom, isTimeout)))
 
-    // Check if everyone answered using the answers table (RLS-safe)
-    const { data: allAnswers } = await supabase.from('answers').select('id').eq('room_id', room.id).eq('question_id', question.id)
-    const { data: allPlayers } = await supabase.from('room_players').select('id').eq('room_id', room.id)
-    if ((allAnswers?.length || 0) >= (allPlayers?.length || 1)) setPhase('voting')
+    // Only add evil score for real answers
+    if (text && !isTimeout) {
+      setEvilScore(prev => Math.min(100, prev + calcEvilGain(weight, answerIdx, isCustom, false)))
+    }
   }
 
   const submitCustom = () => {
     if (!customText.trim()) return
-    submitAnswer(customText.trim(), -1, true, false)
+    submitAnswer(customText.trim(), null, true, false)
     setCustomText('')
   }
 
   const voteAnswer = async (answerId) => {
-    await supabase.from('votes').insert({ answer_id: answerId, voter_player_id: myPlayer.id, room_id: room.id })
-    setPhase('reveal')
+    await supabase.from('votes').insert({
+      answer_id: answerId,
+      voter_player_id: myPlayer.id,
+      room_id: room.id,
+    })
+    setPhase('reveal') // immediate for the voter; fetchAnswers syncs everyone else
   }
 
   const nextQuestion = async () => {
@@ -146,35 +205,62 @@ export default function GameScreen() {
       await supabase.from('rooms').update({ status: 'finished' }).eq('id', room.id)
       goTo('result'); return
     }
-    let query = supabase.from('questions').select('id').eq('is_active', true).order('id', { ascending: true }).range(nextIdx, nextIdx)
-    if (room.level_filter && room.level_filter > 0)
-      query = supabase.from('questions').select('id').eq('is_active', true).eq('level', room.level_filter).order('id', { ascending: true }).range(nextIdx, nextIdx)
+    let query = supabase
+      .from('questions').select('id').eq('is_active', true)
+      .order('id', { ascending: true }).range(nextIdx, nextIdx)
+    if (room.level_filter && room.level_filter > 0) {
+      query = supabase
+        .from('questions').select('id').eq('is_active', true).eq('level', room.level_filter)
+        .order('id', { ascending: true }).range(nextIdx, nextIdx)
+    }
     const { data: q } = await query
-    if (!q?.[0]?.id) { await supabase.from('rooms').update({ status: 'finished' }).eq('id', room.id); goTo('result'); return }
-    await supabase.from('rooms').update({ current_question_index: nextIdx, current_question_id: q[0].id }).eq('id', room.id)
+    if (!q?.[0]?.id) {
+      await supabase.from('rooms').update({ status: 'finished' }).eq('id', room.id)
+      goTo('result'); return
+    }
+    await supabase.from('rooms').update({
+      current_question_index: nextIdx,
+      current_question_id: q[0].id,
+    }).eq('id', room.id)
   }
 
   const sendMessage = async () => {
     if (!chatInput.trim()) return
-    await supabase.from('messages').insert({ room_id: room.id, player_id: myPlayer.id, anonymous_name: myPlayer.anonymous_name, anonymous_avatar: myPlayer.anonymous_avatar, content: chatInput.trim(), message_type: 'chat' })
+    await supabase.from('messages').insert({
+      room_id: room.id,
+      player_id: myPlayer.id,
+      anonymous_name: myPlayer.anonymous_name,
+      anonymous_avatar: myPlayer.anonymous_avatar,
+      content: chatInput.trim(),
+      message_type: 'chat',
+    })
     setChatInput('')
   }
 
   const sendFriendRequest = async (targetPlayer) => {
     if (targetPlayer.user_id === profile.id) return
-    await supabase.from('friendships').insert({ requester_id: profile.id, addressee_id: targetPlayer.user_id, requester_anonymous_name: myPlayer.anonymous_name, met_in_room: room.id })
+    await supabase.from('friendships').insert({
+      requester_id: profile.id,
+      addressee_id: targetPlayer.user_id,
+      requester_anonymous_name: myPlayer.anonymous_name,
+      met_in_room: room.id,
+    })
     setFriendRequests(prev => [...prev, targetPlayer.id])
   }
 
+  // ── Derived values ────────────────────────────────────────────────────────────
   const evilInfo = getEvilLevel(evilScore)
   const levelConf = question ? LEVEL_CONFIG[question.level] : null
   const presetAnswers = getPresetAnswers(question)
   const isHost = room?.host_id === profile?.id
-  const answeredCount = players.filter(p => answers.some(a => a.player_id === p.id)).length
+  const realAnswers = answers.filter(a => a.answer_text) // exclude no-answers
+  const noAnswerPlayers = answers.filter(a => !a.answer_text)
+  const answeredCount = answers.length
   const cardGlow = cardFlipped && levelConf
     ? `0 24px 80px #00000090, 0 0 50px ${levelConf.glow}`
     : '0 20px 60px #00000060'
 
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div style={s.wrap}>
       {/* Header */}
@@ -193,7 +279,10 @@ export default function GameScreen() {
 
       {/* Progress bar */}
       <div style={s.progressBar}>
-        <div style={{ ...s.progressFill, width: `${(((room?.current_question_index || 0) + 1) / (room?.questions_per_game || 7)) * 100}%` }} />
+        <div style={{
+          ...s.progressFill,
+          width: `${(((room?.current_question_index || 0) + 1) / (room?.questions_per_game || 7)) * 100}%`,
+        }} />
       </div>
 
       {/* Evil meter */}
@@ -207,13 +296,26 @@ export default function GameScreen() {
         </div>
       </div>
 
-      {/* Players bar */}
+      {/* Players answered bar */}
       <div style={s.playersBar}>
-        {players.map(p => (
-          <div key={p.id} style={{ ...s.playerDot, background: p.anonymous_color + '22', border: `1px solid ${p.anonymous_color}66`, opacity: answers.some(a => a.player_id === p.id) ? 1 : 0.25 }}>
-            {p.anonymous_avatar}
-          </div>
-        ))}
+        {players.map(p => {
+          const hasAnswered = answers.some(a => a.player_id === p.id)
+          const timedOut = answers.some(a => a.player_id === p.id && !a.answer_text)
+          return (
+            <div
+              key={p.id}
+              title={timedOut ? 'لم يجب' : hasAnswered ? 'أجاب' : 'لم يجب بعد'}
+              style={{
+                ...s.playerDot,
+                background: p.anonymous_color + '22',
+                border: `1px solid ${p.anonymous_color}66`,
+                opacity: hasAnswered ? 1 : 0.25,
+              }}
+            >
+              {timedOut ? '⏰' : p.anonymous_avatar}
+            </div>
+          )
+        })}
         <span style={s.answeredText}>{answeredCount}/{players.length} أجابوا</span>
       </div>
 
@@ -221,8 +323,10 @@ export default function GameScreen() {
       {phase === 'answering' && (
         <>
           {/* Question card */}
-          <div style={{ ...s.questionCard, boxShadow: cardGlow, borderColor: cardFlipped && levelConf ? levelConf.color + '50' : C.border }}
-            onClick={() => !cardFlipped && setCardFlipped(true)}>
+          <div
+            style={{ ...s.questionCard, boxShadow: cardGlow, borderColor: cardFlipped && levelConf ? levelConf.color + '50' : C.border }}
+            onClick={() => !cardFlipped && setCardFlipped(true)}
+          >
             {!cardFlipped ? (
               <div style={s.cardBack}>
                 <div style={s.cardIcon}>🃏</div>
@@ -237,27 +341,44 @@ export default function GameScreen() {
                 )}
                 <p style={s.questionText}>{question?.text}</p>
                 {!myAnswer && (
-                  <div style={{ ...s.timer, color: timeLeft <= 10 ? C.red : C.muted, animation: timeLeft <= 10 ? 'timerPulse 0.6s ease-in-out infinite' : 'none' }}>
+                  <div style={{
+                    ...s.timer,
+                    color: timeLeft <= 10 ? C.red : C.muted,
+                    animation: timeLeft <= 10 ? 'timerPulse 0.6s ease-in-out infinite' : 'none',
+                  }}>
                     ⏱ {timeLeft}ث
                   </div>
                 )}
-                {myAnswer && <div style={s.answeredBadge}>✅ اتسجلت إجابتك</div>}
+                {myAnswer && !myAnswer.answer_text && <div style={s.timedOutBadge}>⏰ انتهى وقتك</div>}
+                {myAnswer && myAnswer.answer_text && <div style={s.answeredBadge}>✅ اتسجلت إجابتك</div>}
               </div>
             )}
           </div>
 
-          {/* Answer options — always visible once card is flipped */}
+          {/* Answer options — A dim (less evil) → D bright (more evil) */}
           {cardFlipped && !myAnswer && (
             <div style={s.answersSection}>
               <div style={s.answersGrid}>
-                {presetAnswers.map((a, i) => (
-                  <button key={i} style={s.answerBtn} onClick={() => submitAnswer(a, i)}>
-                    <span style={{ ...s.answerLetter, opacity: 0.4 + i * 0.2 }}>
-                      {String.fromCharCode(0x0041 + i)}
-                    </span>
-                    <span style={s.answerTxt}>{a}</span>
-                  </button>
-                ))}
+                {presetAnswers.map((a, i) => {
+                  const opacity = 0.45 + i * 0.18
+                  const borderHex = Math.round(opacity * 255).toString(16).padStart(2, '0')
+                  return (
+                    <button
+                      key={i}
+                      style={{ ...s.answerBtn, opacity, borderColor: `#ffffff${borderHex}` }}
+                      onClick={() => submitAnswer(a, i, false, false)}
+                    >
+                      <span style={{
+                        ...s.answerLetter,
+                        background: (levelConf?.color || '#FF3B5C') + '22',
+                        color: levelConf?.color || '#FF3B5C',
+                      }}>
+                        {String.fromCharCode(0x0041 + i)}
+                      </span>
+                      <span style={s.answerTxt}>{a}</span>
+                    </button>
+                  )
+                })}
               </div>
 
               {/* Custom answer — always visible */}
@@ -272,7 +393,10 @@ export default function GameScreen() {
                     onKeyDown={e => e.key === 'Enter' && submitCustom()}
                     dir="rtl"
                   />
-                  <button style={{ ...s.customSubmit, opacity: customText.trim() ? 1 : 0.4 }} onClick={submitCustom}>
+                  <button
+                    style={{ ...s.customSubmit, opacity: customText.trim() ? 1 : 0.4 }}
+                    onClick={submitCustom}
+                  >
                     إرسال
                   </button>
                 </div>
@@ -282,8 +406,10 @@ export default function GameScreen() {
 
           {myAnswer && (
             <div style={s.waitingBox}>
-              <p style={s.waitingText}>✅ إجابتك اتسجلت</p>
-              <p style={s.waitingText2}>في انتظار باقي اللاعبين...</p>
+              <p style={s.waitingText}>
+                {myAnswer.answer_text ? '✅ إجابتك اتسجلت' : '⏰ انتهى وقتك'}
+              </p>
+              <p style={s.waitingText2}>في انتظار باقي اللاعبين... ({answeredCount}/{players.length})</p>
             </div>
           )}
         </>
@@ -293,7 +419,9 @@ export default function GameScreen() {
       {phase === 'voting' && (
         <div style={s.votingSection}>
           <p style={s.voteTitle}>🗳️ صوّت على أجرأ إجابة</p>
-          {answers.map(a => {
+
+          {/* Real answers (voteable) */}
+          {realAnswers.map(a => {
             const player = players.find(p => p.id === a.player_id)
             const isMe = a.player_id === myPlayer?.id
             return (
@@ -309,15 +437,43 @@ export default function GameScreen() {
                   </div>
                 </div>
                 <div style={s.answerCardActions}>
-                  {!isMe && <button style={s.voteBtn} onClick={() => voteAnswer(a.id)}>🔥 أجرأ إجابة</button>}
+                  {!isMe && (
+                    <button style={s.voteBtn} onClick={() => voteAnswer(a.id)}>
+                      🔥 أجرأ إجابة
+                    </button>
+                  )}
                   {!isMe && !friendRequests.includes(player?.id) && (
-                    <button style={s.friendBtn} onClick={() => sendFriendRequest(player)}>👤 اضف صديق</button>
+                    <button style={s.friendBtn} onClick={() => sendFriendRequest(player)}>
+                      👤 اضف صديق
+                    </button>
                   )}
                   {friendRequests.includes(player?.id) && <span style={s.sentText}>✅ طلب أتبعت</span>}
                 </div>
               </div>
             )
           })}
+
+          {/* No-answer players (not voteable) */}
+          {noAnswerPlayers.length > 0 && (
+            <div style={s.noAnswerGroup}>
+              {noAnswerPlayers.map(a => {
+                const player = players.find(p => p.id === a.player_id)
+                return (
+                  <div key={a.id} style={s.noAnswerCard}>
+                    <span style={{ fontSize: 18 }}>{player?.anonymous_avatar}</span>
+                    <span style={{ fontSize: 14, color: '#6A6A9A' }}>{player?.anonymous_name}</span>
+                    <span style={s.noAnswerBadge}>⏰ لم يجب</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {realAnswers.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 24, color: '#6A6A9A', fontSize: 14 }}>
+              كل اللاعبين لم يجيبوا في الوقت المحدد
+            </div>
+          )}
         </div>
       )}
 
@@ -325,13 +481,16 @@ export default function GameScreen() {
       {phase === 'reveal' && (
         <div style={s.revealSection}>
           <p style={s.revealTitle}>🏆 النتائج</p>
-          {answers
+          {[...realAnswers]
             .sort((a, b) => (b.votes?.[0]?.count || 0) - (a.votes?.[0]?.count || 0))
             .map((a, idx) => {
               const player = players.find(p => p.id === a.player_id)
               return (
-                <div key={a.id} style={{ ...s.revealCard, border: idx === 0 ? `2px solid ${C.gold}` : `1px solid ${C.border}` }}>
-                  {idx === 0 && <div style={s.winnerBadge}>🏆 الأجرأ</div>}
+                <div
+                  key={a.id}
+                  style={{ ...s.revealCard, border: idx === 0 && (a.votes?.[0]?.count || 0) > 0 ? `2px solid ${C.gold}` : `1px solid ${C.border}` }}
+                >
+                  {idx === 0 && (a.votes?.[0]?.count || 0) > 0 && <div style={s.winnerBadge}>🏆 الأجرأ</div>}
                   <div style={s.revealTop}>
                     <span style={s.revealAvatar}>{player?.anonymous_avatar}</span>
                     <p style={s.revealName}>{player?.anonymous_name}</p>
@@ -341,10 +500,23 @@ export default function GameScreen() {
                 </div>
               )
             })}
+          {noAnswerPlayers.map(a => {
+            const player = players.find(p => p.id === a.player_id)
+            return (
+              <div key={a.id} style={{ ...s.revealCard, opacity: 0.5 }}>
+                <div style={s.revealTop}>
+                  <span style={s.revealAvatar}>{player?.anonymous_avatar}</span>
+                  <p style={s.revealName}>{player?.anonymous_name}</p>
+                  <span style={{ fontSize: 13, color: '#6A6A9A' }}>⏰ لم يجب</span>
+                </div>
+              </div>
+            )
+          })}
           {isHost && (
             <button style={s.nextBtn} onClick={nextQuestion}>
               {(room?.current_question_index || 0) + 1 >= (room?.questions_per_game || 7)
-                ? '🎭 شوف النتيجة النهائية' : 'السؤال الجاي →'}
+                ? '🎭 شوف النتيجة النهائية'
+                : 'السؤال الجاي →'}
             </button>
           )}
           {!isHost && <p style={s.waitHost}>في انتظار المضيف...</p>}
@@ -371,7 +543,14 @@ export default function GameScreen() {
             <div ref={chatEndRef} />
           </div>
           <div style={s.chatInputRow}>
-            <input style={s.chatInput} placeholder="اكتب رسالة..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} dir="rtl" />
+            <input
+              style={s.chatInput}
+              placeholder="اكتب رسالة..."
+              value={chatInput}
+              onChange={e => setChatInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && sendMessage()}
+              dir="rtl"
+            />
             <button style={s.chatSend} onClick={sendMessage}>إرسال</button>
           </div>
         </div>
@@ -387,6 +566,7 @@ export default function GameScreen() {
   )
 }
 
+// ── Styles ────────────────────────────────────────────────────────────────────
 const s = {
   wrap: { flex:1, display:'flex', flexDirection:'column', padding:'16px', gap:10, overflowY:'auto', position:'relative', background:'#060609' },
   header: { display:'flex', alignItems:'center', justifyContent:'space-between' },
@@ -412,10 +592,11 @@ const s = {
   questionText: { fontSize:18, fontWeight:700, color:'#EEEEFF', lineHeight:1.8 },
   timer: { fontSize:14, fontWeight:700, transition:'color 0.3s' },
   answeredBadge: { fontSize:14, color:'#00F5A0', fontWeight:700 },
+  timedOutBadge: { fontSize:14, color:'#FFD93D', fontWeight:700 },
   answersSection: { display:'flex', flexDirection:'column', gap:10 },
   answersGrid: { display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 },
-  answerBtn: { background:'#0D0D14', border:'2px solid #ffffff15', borderRadius:12, padding:'12px 10px', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:6, cursor:'pointer', fontFamily:'inherit', textAlign:'right', transition:'all 0.2s' },
-  answerLetter: { fontSize:11, fontWeight:900, color:'#FF3B5C', background:'#FF3B5C20', borderRadius:6, padding:'2px 8px' },
+  answerBtn: { background:'#0D0D14', border:'2px solid', borderRadius:12, padding:'12px 10px', display:'flex', flexDirection:'column', alignItems:'flex-start', gap:6, cursor:'pointer', fontFamily:'inherit', textAlign:'right', transition:'all 0.2s' },
+  answerLetter: { fontSize:11, fontWeight:900, borderRadius:6, padding:'2px 8px' },
   answerTxt: { fontSize:13, color:'#EEEEFF', lineHeight:1.5 },
   customSection: { background:'#0D0D14', borderRadius:14, padding:'12px 14px', border:'1px dashed #9B5DE540', display:'flex', flexDirection:'column', gap:8 },
   customLabel: { fontSize:13, color:'#9B5DE5', fontWeight:600 },
@@ -438,6 +619,9 @@ const s = {
   voteBtn: { flex:1, background:'linear-gradient(135deg,#FF3B5C,#9B5DE5)', color:'#fff', border:'none', borderRadius:10, padding:'10px', fontSize:14, fontWeight:700, cursor:'pointer', fontFamily:'inherit' },
   friendBtn: { background:'#111120', color:'#6A6A9A', border:'1px solid #ffffff15', borderRadius:10, padding:'10px 14px', fontSize:13, cursor:'pointer', fontFamily:'inherit' },
   sentText: { fontSize:13, color:'#00F5A0', alignSelf:'center' },
+  noAnswerGroup: { display:'flex', flexDirection:'column', gap:6 },
+  noAnswerCard: { display:'flex', alignItems:'center', gap:10, background:'#0D0D1488', borderRadius:12, padding:'10px 14px', border:'1px dashed #ffffff15' },
+  noAnswerBadge: { fontSize:12, color:'#FFD93D', background:'#FFD93D15', borderRadius:6, padding:'2px 10px', marginRight:'auto' },
   revealSection: { display:'flex', flexDirection:'column', gap:10 },
   revealTitle: { fontSize:20, fontWeight:900, color:'#EEEEFF', textAlign:'center' },
   revealCard: { background:'#0D0D14', borderRadius:14, padding:14, position:'relative' },
