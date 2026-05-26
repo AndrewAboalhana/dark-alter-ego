@@ -1,8 +1,8 @@
-// Multiple answer pools per level — pick based on question ID so each question
-// consistently gets unique answers instead of every level-N question sharing one set.
+// ── Answer pools (fallback when DB answer_options is missing) ─────────────────
+// Multiple sets per level keyed by question-ID seed so each question looks unique
 const ANSWER_POOLS = {
   1: [
-    ['أكمل في طريقي بس', 'أكون صريح مع الناس', 'أتغاضى عنها وأنسى', 'أستشير حد قريب مني'],
+    ['أكمل في طريقي بس', 'أكون صريح بالكامل', 'أتغاضى عنه وأنسى', 'أعمل اللي يريح ضميري'],
     ['أقول الحق وأتحمل النتيجة', 'أعيش اللحظة من غير تفكير', 'أحافظ على السلام وأسكت', 'أجرب حاجة جديدة'],
     ['أدافع عن نفسي لو لزم', 'أسيب الموضوع يعدي', 'أواجه الحقيقة مهما كانت', 'أتصرف بما يريح ضميري'],
     ['أفكر في تأثيره على الناس', 'أعمل اللي يريحني أنا', 'أشاور حد أثق فيه', 'أتصرف وبعدين أتندم'],
@@ -37,12 +37,27 @@ export function getAnswersForQuestion(question) {
   return ANSWER_POOLS[level][seed % 4]
 }
 
+/**
+ * Calculate evil score gain based on question level + which answer index (0-3) was chosen.
+ * Answers are ordered A (least evil) → D (most evil) in the DB.
+ * Formula: ceil((level + answerIdx) × 14 / 7)
+ * — Max per question: level 4 + idx 3 = ceil(7×14/7) = 14 pts
+ * — 7 questions × 14 pts max = 98% evil at most
+ * — Average answerer (level 2, idx 1): ceil(3×14/7) = 6 pts × 7 = 42% evil
+ */
+export function calcEvilGain(level, answerIdx, isCustom = false, isTimeout = false) {
+  const l = Math.min(4, Math.max(1, level || 1))
+  if (isTimeout) return l                                         // 1–4 pts, minimal
+  const idx = isCustom ? 2.5 : Math.min(3, Math.max(0, answerIdx ?? 0))
+  return Math.ceil((l + idx) * 14 / 7)
+}
+
 export const FALLBACK_QUESTIONS = [
-  { id: 'f1', text: 'كدبت على حد قريب منك وما اتندمتش — إيه كان الكدب ده؟', level: 1 },
-  { id: 'f2', text: 'في حاجة بتتمنى تعملها بس الخوف من رأي الناس بيمنعك، إيه هي؟', level: 1 },
-  { id: 'f3', text: 'لو تعرف إن مفيش حد هيعرف، إيه أكتر حاجة هتعملها دلوقتي؟', level: 2 },
-  { id: 'f4', text: 'في حد في حياتك بتتمنى تشوفه بيتعذب شوية — مين ده؟', level: 2 },
-  { id: 'f5', text: 'لو تعرف إنك مش هتتحاسب خالص، مين اللي كنت هتأذيه؟', level: 3 },
-  { id: 'f6', text: 'إيه أقوى انتقام فكرت فيه وحسيت إنه عادل؟', level: 3 },
-  { id: 'f7', text: 'إيه أكتر حاجة بتكدب فيها على نفسك كل يوم وبتصدقها؟', level: 4 },
+  { id: 'f1', text: 'كدبت على حد بيحبك وحسيت بارتياح مش ذنب — إيه كان الكدب ده؟', level: 1 },
+  { id: 'f2', text: 'في حاجة بتعملها سراً وبتعرف إنك هتوقف لو حد قريب منك عرف — إيه هي؟', level: 1 },
+  { id: 'f3', text: 'لو ضمنت إن مفيش حد في حياتك هيعرف خالص — إيه أول حاجة هتعملها دلوقتي؟', level: 2 },
+  { id: 'f4', text: 'مين الشخص اللي لو خسر حاجة مهمة في حياته كنت هتبقى مبسوط في السر؟', level: 2 },
+  { id: 'f5', text: 'لو عرفت إنك مش هتتحاسب ومفيش عواقب — مين اللي كنت هتأذيه وإزاي؟', level: 3 },
+  { id: 'f6', text: 'لو تقدر تعيش يوم واحد بدون ضمير خالص ومفيش محاسبة — إيه هتعمله؟', level: 3 },
+  { id: 'f7', text: 'لو عارف إنك هتموت بعد سنة — إيه الحقيقة اللي هتقولها للناس وما قلتهاش لحد؟', level: 4 },
 ]

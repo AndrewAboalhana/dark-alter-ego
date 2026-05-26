@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useGame } from '../context/GameContext'
 import { supabase } from '../lib/supabase'
 import { C, LEVEL_CONFIG, getEvilLevel } from '../lib/theme'
-import { getAnswersForQuestion, FALLBACK_QUESTIONS } from '../lib/questions'
+import { getAnswersForQuestion, FALLBACK_QUESTIONS, calcEvilGain } from '../lib/questions'
 
 const TOTAL_QUESTIONS = 7
 
@@ -26,7 +26,9 @@ export default function SoloGameScreen() {
   const [selectedAnswer, setSelectedAnswer] = useState(null)
   const [evilScore, setEvilScore] = useState(0)
   const [playerAnswers, setPlayerAnswers] = useState([])
+  const [customText, setCustomText] = useState('')
   const timerRef = useRef(null)
+  const answeredRef = useRef(false)
 
   const fetchQuestions = useCallback(async (level) => {
     setPhase('loading')
@@ -36,7 +38,6 @@ export default function SoloGameScreen() {
       const { data, error } = await query.order('id', { ascending: true }).limit(TOTAL_QUESTIONS)
 
       if (!error && data && data.length >= 3) {
-        // Pad with fallback if not enough questions at this level
         if (data.length < TOTAL_QUESTIONS) {
           const fallback = FALLBACK_QUESTIONS.filter(q => level === 0 || q.level === level)
           setQuestions([...data, ...fallback].slice(0, TOTAL_QUESTIONS))
@@ -57,21 +58,33 @@ export default function SoloGameScreen() {
 
   const currentQuestion = questions[currentIndex]
   const levelConf = currentQuestion ? (LEVEL_CONFIG[currentQuestion.level] || LEVEL_CONFIG[1]) : null
-  // Prefer DB-stored answer_options; fall back to generated pools if column is missing
   const presetAnswers = (currentQuestion?.answer_options && currentQuestion.answer_options.length >= 4)
     ? currentQuestion.answer_options
     : getAnswersForQuestion(currentQuestion)
 
-  const handleAnswer = useCallback((text, isTimeout = false) => {
-    if (answered || !currentQuestion) return
+  const handleAnswer = useCallback((text, answerIdx, isCustom = false, isTimeout = false) => {
+    if (answeredRef.current || !currentQuestion) return
+    answeredRef.current = true
     clearInterval(timerRef.current)
-    const weight = currentQuestion.level || 1
-    const evilGain = isTimeout ? weight * 4 : weight * 8
+    const level = currentQuestion.level || 1
+    const evilGain = calcEvilGain(level, answerIdx, isCustom, isTimeout)
     setSelectedAnswer(text)
     setAnswered(true)
     setEvilScore(prev => Math.min(100, prev + evilGain))
-    setPlayerAnswers(prev => [...prev, { question: currentQuestion, answer: text, evilGain, isTimeout }])
-  }, [answered, currentQuestion])
+    setPlayerAnswers(prev => [...prev, {
+      question: currentQuestion,
+      answer: text,
+      evilGain,
+      isTimeout,
+      isCustom,
+      answerIdx,
+    }])
+  }, [currentQuestion])
+
+  const submitCustom = useCallback(() => {
+    if (!customText.trim() || answeredRef.current) return
+    handleAnswer(customText.trim(), null, true, false)
+  }, [customText, handleAnswer])
 
   // Advance after answering
   useEffect(() => {
@@ -83,7 +96,9 @@ export default function SoloGameScreen() {
         setCurrentIndex(i => i + 1)
         setCardFlipped(false)
         setAnswered(false)
+        answeredRef.current = false
         setSelectedAnswer(null)
+        setCustomText('')
       }
     }, 1500)
     return () => clearTimeout(t)
@@ -94,6 +109,7 @@ export default function SoloGameScreen() {
     if (phase !== 'playing' || !cardFlipped || answered) return
     const maxTime = levelConf?.time || 30
     setTimeLeft(maxTime)
+    answeredRef.current = false
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) { clearInterval(timerRef.current); return 0 }
@@ -103,10 +119,10 @@ export default function SoloGameScreen() {
     return () => clearInterval(timerRef.current)
   }, [phase, cardFlipped, answered, currentIndex])
 
-  // Auto-answer on timeout
+  // Auto-submit on timeout (first preset answer, minimal evil)
   useEffect(() => {
-    if (timeLeft === 0 && cardFlipped && !answered && phase === 'playing' && presetAnswers.length) {
-      handleAnswer(presetAnswers[Math.floor(Math.random() * presetAnswers.length)], true)
+    if (timeLeft === 0 && cardFlipped && !answeredRef.current && phase === 'playing') {
+      handleAnswer(presetAnswers[0] || '...', 0, false, true)
     }
   }, [timeLeft]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -225,7 +241,11 @@ export default function SoloGameScreen() {
             )}
             <p style={s.questionText}>{currentQuestion?.text}</p>
             {!answered && (
-              <div style={{ ...s.timer, color: timeLeft <= 10 ? '#FF3B5C' : '#6A6A9A', animation: timeLeft <= 10 ? 'timerPulse 0.6s ease-in-out infinite' : 'none' }}>
+              <div style={{
+                ...s.timer,
+                color: timeLeft <= 10 ? '#FF3B5C' : '#6A6A9A',
+                animation: timeLeft <= 10 ? 'timerPulse 0.6s ease-in-out infinite' : 'none'
+              }}>
                 ⏱ {timeLeft}ث
               </div>
             )}
@@ -234,19 +254,60 @@ export default function SoloGameScreen() {
         )}
       </div>
 
-      {/* Answer options */}
+      {/* Answer options — A lightest → D darkest (opacity reflects darkness) */}
       {cardFlipped && !answered && (
         <div style={s.answersGrid}>
-          {presetAnswers.map((a, i) => (
-            <button key={i} style={s.answerBtn} onClick={() => handleAnswer(a)}>
-              <span style={s.answerLetter}>{String.fromCharCode(0x0041 + i)}</span>
-              <span style={s.answerTxt}>{a}</span>
-            </button>
-          ))}
+          {presetAnswers.map((a, i) => {
+            const opacity = 0.45 + i * 0.18
+            const borderHex = Math.round(opacity * 255).toString(16).padStart(2, '0')
+            return (
+              <button
+                key={i}
+                style={{
+                  ...s.answerBtn,
+                  opacity,
+                  borderColor: `#ffffff${borderHex}`,
+                }}
+                onClick={() => handleAnswer(a, i, false, false)}
+              >
+                <span style={{
+                  ...s.answerLetter,
+                  background: `${levelConf?.color || '#FF3B5C'}25`,
+                  color: levelConf?.color || '#FF3B5C',
+                }}>
+                  {String.fromCharCode(0x0041 + i)}
+                </span>
+                <span style={s.answerTxt}>{a}</span>
+              </button>
+            )
+          })}
         </div>
       )}
 
-      {/* Feedback */}
+      {/* Always-visible custom answer input */}
+      {cardFlipped && !answered && (
+        <div style={s.customSection}>
+          <p style={s.customLabel}>✍️ أو اكتب إجابتك الحقيقية</p>
+          <div style={s.customRow}>
+            <input
+              style={s.customInput}
+              placeholder="اكتب هنا بصراحة..."
+              value={customText}
+              onChange={e => setCustomText(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submitCustom()}
+              dir="rtl"
+            />
+            <button
+              style={{ ...s.customSubmit, opacity: customText.trim() ? 1 : 0.4 }}
+              onClick={submitCustom}
+            >
+              إرسال
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback after answering */}
       {answered && selectedAnswer && (
         <div style={s.selectedBox}>
           <p style={s.selectedLabel}>إجابتك:</p>
@@ -292,7 +353,10 @@ function ResultsSummary({ evilScore, evilInfo, playerAnswers, goTo }) {
               <div style={sr.answerRowTop}>
                 <span style={{ ...sr.qNum, color: conf.color }}>{conf.emoji} س{i + 1}</span>
                 <span style={{ fontSize: 12, color: '#6A6A9A' }}>
-                  {item.isTimeout ? '⏰ انتهى الوقت' : `+${item.evilGain}% شر`}
+                  {item.isTimeout ? '⏰ انتهى الوقت' : `+${item.evilGain}%`}
+                  {item.isCustom && !item.isTimeout && ' ✍️'}
+                  {item.answerIdx !== null && item.answerIdx !== undefined && !item.isCustom && !item.isTimeout &&
+                    ` — ${String.fromCharCode(0x0041 + item.answerIdx)}`}
                 </span>
               </div>
               <p style={sr.qText}>{item.question?.text}</p>
@@ -343,7 +407,7 @@ const s = {
   evilMeter: { background: '#0D0D14', borderRadius: 12, padding: '10px 14px', border: '1px solid', display: 'flex', flexDirection: 'column', gap: 6 },
   evilMeterRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   evilBar: { height: 6, background: '#ffffff08', borderRadius: 4, overflow: 'hidden' },
-  evilFill: { height: '100%', borderRadius: 4, transition: 'width 0.5s ease, background 0.5s ease' },
+  evilFill: { height: '100%', borderRadius: 4, transition: 'width 0.6s ease, background 0.6s ease' },
   questionCard: { background: '#0D0D14', borderRadius: 20, minHeight: 165, border: '1px solid', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, cursor: 'pointer', transition: 'box-shadow 0.4s ease, border-color 0.4s ease' },
   cardBack: { textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 },
   cardIcon: { fontSize: 52, animation: 'float 3s ease-in-out infinite' },
@@ -354,11 +418,51 @@ const s = {
   timer: { fontSize: 14, fontWeight: 700, transition: 'color 0.3s' },
   answeredBadge: { fontSize: 14, color: '#00F5A0', fontWeight: 700 },
   answersGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
-  answerBtn: { background: '#0D0D14', border: '2px solid #ffffff15', borderRadius: 12, padding: '12px 10px', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'right', transition: 'all 0.2s' },
-  answerLetter: { fontSize: 11, fontWeight: 900, color: '#FF3B5C', background: '#FF3B5C20', borderRadius: 6, padding: '2px 8px' },
+  answerBtn: {
+    background: '#0D0D14',
+    border: '2px solid',
+    borderRadius: 12,
+    padding: '12px 10px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 6,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    textAlign: 'right',
+    transition: 'all 0.2s',
+  },
+  answerLetter: { fontSize: 11, fontWeight: 900, borderRadius: 6, padding: '2px 8px' },
   answerTxt: { fontSize: 13, color: '#EEEEFF', lineHeight: 1.5 },
+  customSection: { background: '#0D0D14', borderRadius: 14, padding: '14px 16px', border: '1px solid #9B5DE530', display: 'flex', flexDirection: 'column', gap: 10 },
+  customLabel: { fontSize: 13, color: '#9B5DE5', fontWeight: 700, margin: 0 },
+  customRow: { display: 'flex', gap: 8, alignItems: 'center' },
+  customInput: {
+    flex: 1,
+    background: '#111120',
+    border: '1px solid #ffffff20',
+    borderRadius: 10,
+    padding: '10px 14px',
+    fontSize: 14,
+    color: '#EEEEFF',
+    fontFamily: 'inherit',
+    outline: 'none',
+  },
+  customSubmit: {
+    background: 'linear-gradient(135deg, #FF3B5C, #9B5DE5)',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 10,
+    padding: '10px 16px',
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    whiteSpace: 'nowrap',
+    transition: 'opacity 0.2s',
+  },
   selectedBox: { background: '#00F5A010', border: '1px solid #00F5A030', borderRadius: 14, padding: '16px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 6 },
-  selectedLabel: { fontSize: 12, color: '#6A6A9A' },
+  selectedLabel: { fontSize: 12, color: '#6A6A9A', margin: 0 },
   selectedText: { fontSize: 16, color: '#00F5A0', fontWeight: 700, lineHeight: 1.5 },
   nextHint: { fontSize: 13, color: '#6A6A9A', animation: 'pulse 1.5s infinite' },
 }
