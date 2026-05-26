@@ -67,6 +67,10 @@ export default function OnboardScreen() {
         {loading ? '...' : 'يلا نبدأ 😈'}
       </button>
 
+      <button style={s.soloBtn} onClick={() => goTo('solo')}>
+        🎭 العب لوحدك من غير تسجيل
+      </button>
+
       <style>{`
         @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
         input::placeholder { color: #8888AA; }
@@ -107,5 +111,11 @@ const s = {
     color: '#fff', border: 'none', borderRadius: 14, padding: '16px 24px',
     fontSize: 18, fontWeight: 700, cursor: 'pointer',
     fontFamily: 'inherit', boxShadow: '0 8px 32px #FF3B5C44',
+  },
+  soloBtn: {
+    background: 'transparent', color: '#8888AA',
+    border: '1px solid #ffffff20', borderRadius: 14, padding: '14px 24px',
+    fontSize: 15, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+    marginTop: -8,
   },
 }

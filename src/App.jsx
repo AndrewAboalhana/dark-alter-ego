@@ -5,6 +5,7 @@ import HomeScreen from './screens/HomeScreen'
 import LobbyScreen from './screens/LobbyScreen'
 import GameScreen from './screens/GameScreen'
 import ResultScreen from './screens/ResultScreen'
+import SoloGameScreen from './screens/SoloGameScreen'
 
 export default function App() {
   const { screen, loading } = useGame()
@@ -23,6 +24,7 @@ export default function App() {
     lobby: <LobbyScreen />,
     game: <GameScreen />,
     result: <ResultScreen />,
+    solo: <SoloGameScreen />,
   }
 
   return (
