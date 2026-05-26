@@ -218,7 +218,10 @@ export default function GameScreen() {
 
   const evilInfo = getEvilLevel(evilScore)
   const levelConf = question ? LEVEL_CONFIG[question.level] : null
-  const presetAnswers = getAnswersForQuestion(question)
+  // Prefer DB-stored answer_options; fall back to generated pools if column is missing
+  const presetAnswers = (question?.answer_options && question.answer_options.length >= 4)
+    ? question.answer_options
+    : getAnswersForQuestion(question)
   const isHost = room?.host_id === profile?.id
   const answeredCount = players.filter(p => answers.some(a => a.player_id === p.id)).length
   const cardGlow = cardFlipped && levelConf

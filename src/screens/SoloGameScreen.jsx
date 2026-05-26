@@ -57,7 +57,10 @@ export default function SoloGameScreen() {
 
   const currentQuestion = questions[currentIndex]
   const levelConf = currentQuestion ? (LEVEL_CONFIG[currentQuestion.level] || LEVEL_CONFIG[1]) : null
-  const presetAnswers = getAnswersForQuestion(currentQuestion)
+  // Prefer DB-stored answer_options; fall back to generated pools if column is missing
+  const presetAnswers = (currentQuestion?.answer_options && currentQuestion.answer_options.length >= 4)
+    ? currentQuestion.answer_options
+    : getAnswersForQuestion(currentQuestion)
 
   const handleAnswer = useCallback((text, isTimeout = false) => {
     if (answered || !currentQuestion) return
