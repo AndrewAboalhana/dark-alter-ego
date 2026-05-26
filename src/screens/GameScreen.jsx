@@ -26,6 +26,8 @@ export default function GameScreen() {
   // Always reflects latest myAnswer so timer callback sees it (stale closure fix)
   const myAnswerRef = useRef(null)
   useEffect(() => { myAnswerRef.current = myAnswer }, [myAnswer])
+  // Track cumulative evil score in a ref so submitAnswer can always read the latest value
+  const evilScoreRef = useRef(0)
 
   // ── Main subscription effect ──────────────────────────────────────────────────
   useEffect(() => {
@@ -177,9 +179,16 @@ export default function GameScreen() {
     setMyAnswer(data)
     myAnswerRef.current = data
 
-    // Only add evil score for real answers
+    // Only add evil score for real answers (not timeout / no-answer)
     if (text && !isTimeout) {
-      setEvilScore(prev => Math.min(100, prev + calcEvilGain(weight, answerIdx, isCustom, false)))
+      const gain = calcEvilGain(weight, answerIdx, isCustom, false)
+      const newScore = Math.min(100, evilScoreRef.current + gain)
+      evilScoreRef.current = newScore
+      setEvilScore(newScore)
+      // ✅ Persist cumulative score to DB — ResultScreen reads room_players.evil_score
+      supabase.from('room_players')
+        .update({ evil_score: newScore })
+        .eq('id', myPlayer.id)
     }
   }
 
