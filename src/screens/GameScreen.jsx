@@ -20,6 +20,7 @@ export default function GameScreen() {
   const [chatInput, setChatInput] = useState('')
   const [showChat, setShowChat] = useState(false)
   const [evilScore, setEvilScore] = useState(0)
+  const [myVote, setMyVote] = useState(null) // answerId once voted
   const [friendRequests, setFriendRequests] = useState([])
   const timerRef = useRef(null)
   const chatEndRef = useRef(null)
@@ -39,6 +40,7 @@ export default function GameScreen() {
     myAnswerRef.current = null
     setAnswers([])
     setCustomText('')
+    setMyVote(null)
     setTimeLeft(room.timer_seconds || TIMER_DEFAULT)
 
     fetchCurrentQuestion()
@@ -61,6 +63,7 @@ export default function GameScreen() {
           setAnswers([])
           setPhase('answering')
           setCardFlipped(false)
+          setMyVote(null)
           setTimeLeft(r.timer_seconds || TIMER_DEFAULT) // use host-set timer
           setCustomText('')
         }
@@ -143,8 +146,10 @@ export default function GameScreen() {
       setPhase(prev => prev === 'answering' ? 'voting' : prev)
     }
 
-    // Any vote was cast → everyone moves to reveal
-    if (allAnswers.some(a => (a.votes?.[0]?.count || 0) > 0)) {
+    // Total votes cast across all answers for this question
+    const totalVotes = allAnswers.reduce((sum, a) => sum + (a.votes?.[0]?.count || 0), 0)
+    // Move to reveal only when ALL players have voted (1 vote each)
+    if (playerCount > 0 && totalVotes >= playerCount) {
       setPhase(prev => (prev === 'answering' || prev === 'voting') ? 'reveal' : prev)
     }
   }, [room?.id, room?.current_question_id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -186,7 +191,8 @@ export default function GameScreen() {
       evilScoreRef.current = newScore
       setEvilScore(newScore)
       // ✅ Persist cumulative score to DB — ResultScreen reads room_players.evil_score
-      supabase.from('room_players')
+      // Must await — Supabase JS v2 queries are lazy and don't execute without await
+      await supabase.from('room_players')
         .update({ evil_score: newScore })
         .eq('id', myPlayer.id)
     }
@@ -199,12 +205,15 @@ export default function GameScreen() {
   }
 
   const voteAnswer = async (answerId) => {
+    if (myVote) return // already voted
+    setMyVote(answerId) // optimistic — disable button immediately
     await supabase.from('votes').insert({
       answer_id: answerId,
       voter_player_id: myPlayer.id,
       room_id: room.id,
     })
-    setPhase('reveal') // immediate for the voter; fetchAnswers syncs everyone else
+    // fetchAnswers (triggered by realtime votes INSERT) will count all votes
+    // and move everyone to reveal only when all players have voted
   }
 
   const nextQuestion = async () => {
@@ -429,12 +438,23 @@ export default function GameScreen() {
         <div style={s.votingSection}>
           <p style={s.voteTitle}>🗳️ صوّت على أجرأ إجابة</p>
 
+          {/* Voting status */}
+          {myVote
+            ? <div style={s.votedBanner}>✅ صوتك اتسجل — في انتظار باقي اللاعبين...</div>
+            : <p style={s.voteHint}>صوّت على إجابة واحدة بس</p>
+          }
+
           {/* Real answers (voteable) */}
           {realAnswers.map(a => {
             const player = players.find(p => p.id === a.player_id)
             const isMe = a.player_id === myPlayer?.id
+            const isMyVote = myVote === a.id
             return (
-              <div key={a.id} style={s.answerCard}>
+              <div key={a.id} style={{
+                ...s.answerCard,
+                borderColor: isMyVote ? '#FF3B5C88' : '#ffffff15',
+                background: isMyVote ? '#FF3B5C0A' : '#0D0D14',
+              }}>
                 <div style={s.answerCardTop}>
                   <div style={{ ...s.answerAvatar, background: player?.anonymous_color + '22', border: `1px solid ${player?.anonymous_color}55` }}>
                     {player?.anonymous_avatar}
@@ -446,10 +466,13 @@ export default function GameScreen() {
                   </div>
                 </div>
                 <div style={s.answerCardActions}>
-                  {!isMe && (
+                  {!isMe && !myVote && (
                     <button style={s.voteBtn} onClick={() => voteAnswer(a.id)}>
                       🔥 أجرأ إجابة
                     </button>
+                  )}
+                  {!isMe && myVote && isMyVote && (
+                    <span style={{ fontSize: 13, color: '#FF3B5C', fontWeight: 700 }}>🔥 صوتك</span>
                   )}
                   {!isMe && !friendRequests.includes(player?.id) && (
                     <button style={s.friendBtn} onClick={() => sendFriendRequest(player)}>
@@ -617,6 +640,8 @@ const s = {
   waitingText2: { fontSize:13, color:'#6A6A9A', marginTop:6, animation:'pulse 2s infinite' },
   votingSection: { display:'flex', flexDirection:'column', gap:10 },
   voteTitle: { fontSize:18, fontWeight:900, color:'#EEEEFF', textAlign:'center' },
+  voteHint: { fontSize:13, color:'#6A6A9A', textAlign:'center', margin:0 },
+  votedBanner: { background:'#00F5A012', border:'1px solid #00F5A030', borderRadius:12, padding:'10px 16px', textAlign:'center', fontSize:14, color:'#00F5A0', fontWeight:700, animation:'pulse 2s infinite' },
   answerCard: { background:'#0D0D14', borderRadius:14, padding:14, border:'1px solid #ffffff15', display:'flex', flexDirection:'column', gap:10 },
   answerCardTop: { display:'flex', gap:12 },
   answerAvatar: { width:40, height:40, borderRadius:'50%', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0 },
