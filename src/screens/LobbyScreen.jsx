@@ -1,12 +1,21 @@
 import { useState, useEffect } from 'react'
 import { useGame } from '../context/GameContext'
-import { C } from '../lib/theme'
+import { C, LEVEL_CONFIG } from '../lib/theme'
 import { supabase } from '../lib/supabase'
+
+const LEVEL_OPTIONS = [
+  { val: 0, label: 'كل المستويات', emoji: '🎲', desc: 'مزيج من الكل' },
+  { val: 1, label: 'دافئ',          emoji: '🟡', desc: LEVEL_CONFIG[1].label },
+  { val: 2, label: 'ساخن',          emoji: '🟠', desc: LEVEL_CONFIG[2].label },
+  { val: 3, label: 'حارق',          emoji: '🔴', desc: LEVEL_CONFIG[3].label },
+  { val: 4, label: 'جهنمي',         emoji: '💀', desc: 'مش لضعاف القلوب' },
+]
 
 export default function LobbyScreen() {
   const { room, myPlayer, profile, goTo, setRoom } = useGame()
   const [players, setPlayers] = useState([])
   const [copied, setCopied] = useState(false)
+  const [levelFilter, setLevelFilter] = useState(room?.level_filter || 0)
   const isHost = room?.host_id === profile?.id
 
   useEffect(() => {
@@ -42,19 +51,32 @@ export default function LobbyScreen() {
   }
 
   const startGame = async () => {
-    const { data: questions } = await supabase
+    // Stable sort by id — deterministic regardless of play_count ties
+    let query = supabase
       .from('questions')
       .select('id')
       .eq('is_active', true)
-      .order('play_count', { ascending: true })
-      .limit(7)
+      .order('id', { ascending: true })
+      .limit(1)
 
+    if (levelFilter > 0) {
+      query = supabase
+        .from('questions')
+        .select('id')
+        .eq('is_active', true)
+        .eq('level', levelFilter)
+        .order('id', { ascending: true })
+        .limit(1)
+    }
+
+    const { data: questions } = await query
     if (!questions?.length) return
 
     await supabase.from('rooms').update({
       status: 'playing',
       current_question_index: 0,
       current_question_id: questions[0].id,
+      level_filter: levelFilter,
     }).eq('id', room.id)
   }
 
@@ -88,20 +110,58 @@ export default function LobbyScreen() {
         </button>
       </div>
 
+      {/* Level selector — host only */}
+      {isHost && (
+        <div style={s.section}>
+          <p style={s.sectionLabel}>🌑 مستوى الظلام</p>
+          <div style={s.levelRow}>
+            {LEVEL_OPTIONS.map(opt => {
+              const active = levelFilter === opt.val
+              const col = opt.val === 0 ? '#9B5DE5' : LEVEL_CONFIG[opt.val]?.color || '#9B5DE5'
+              return (
+                <button
+                  key={opt.val}
+                  style={{
+                    ...s.levelBtn,
+                    borderColor: active ? col : '#ffffff15',
+                    background: active ? col + '22' : '#0D0D14',
+                    color: active ? col : '#6A6A9A',
+                  }}
+                  onClick={() => setLevelFilter(opt.val)}
+                >
+                  <span style={{ fontSize: 18 }}>{opt.emoji}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700 }}>{opt.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Non-host sees the chosen level */}
+      {!isHost && room?.level_filter !== undefined && (
+        <div style={s.levelDisplay}>
+          <span style={{ color: '#6A6A9A', fontSize: 13 }}>مستوى الظلام: </span>
+          <span style={{ fontWeight: 700, color: '#EEEEFF', fontSize: 13 }}>
+            {LEVEL_OPTIONS.find(o => o.val === (room.level_filter || 0))?.emoji} {LEVEL_OPTIONS.find(o => o.val === (room.level_filter || 0))?.label}
+          </span>
+        </div>
+      )}
+
       {/* Players */}
       <div style={s.section}>
         <p style={s.sectionLabel}>اللاعبين ({players.length}/{room?.max_players})</p>
         <div style={s.playersList}>
           {players.map(p => (
             <div key={p.id} style={s.playerCard}>
-              <div style={{ ...s.playerAvatar, background: p.anonymous_color + '22', border: `2px solid ${p.anonymous_color}` }}>
+              <div style={{ ...s.playerAvatar, background: p.anonymous_color + '22', border: `2px solid ${p.anonymous_color}66` }}>
                 {p.anonymous_avatar}
               </div>
               <div style={s.playerInfo}>
                 <p style={s.playerName}>{p.anonymous_name}</p>
                 {p.user_id === room?.host_id && <span style={s.hostBadge}>المضيف</span>}
               </div>
-              <div style={{ ...s.readyBadge, color: p.is_ready || p.user_id === room?.host_id ? '#00F5A0' : '#8888AA' }}>
+              <div style={{ ...s.readyBadge, color: p.is_ready || p.user_id === room?.host_id ? '#00F5A0' : '#6A6A9A' }}>
                 {p.is_ready || p.user_id === room?.host_id ? '✅ جاهز' : '⏳ لسه'}
               </div>
             </div>
@@ -122,7 +182,7 @@ export default function LobbyScreen() {
 
         {isHost && (
           <button
-            style={{ ...s.startBtn, opacity: allReady || players.length >= 2 ? 1 : 0.5 }}
+            style={{ ...s.startBtn, opacity: players.length >= 2 ? 1 : 0.5 }}
             onClick={startGame}
             disabled={players.length < 2}
           >
@@ -141,26 +201,29 @@ export default function LobbyScreen() {
 }
 
 const s = {
-  wrap: { flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', gap: 16, overflowY: 'auto' },
+  wrap: { flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', gap: 14, overflowY: 'auto', background: '#060609' },
   topBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-  backBtn: { background: 'transparent', border: '1px solid #ffffff12', color: '#8888AA', borderRadius: 10, padding: '8px 14px', fontSize: 14, cursor: 'pointer', fontFamily: 'inherit' },
-  title: { fontSize: 22, fontWeight: 900, color: '#F0F0FF' },
+  backBtn: { background: 'transparent', border: '1px solid #ffffff15', color: '#6A6A9A', borderRadius: 10, padding: '8px 14px', fontSize: 14, cursor: 'pointer', fontFamily: 'inherit' },
+  title: { fontSize: 22, fontWeight: 900, color: '#EEEEFF' },
   placeholder: { width: 80 },
-  codeBox: { background: '#13131A', borderRadius: 16, padding: 20, textAlign: 'center', border: '1px solid #ffffff12' },
-  codeLabel: { fontSize: 13, color: '#8888AA', marginBottom: 8 },
+  codeBox: { background: '#0D0D14', borderRadius: 16, padding: 20, textAlign: 'center', border: '1px solid #ffffff15', boxShadow: '0 0 40px #9B5DE518' },
+  codeLabel: { fontSize: 13, color: '#6A6A9A', marginBottom: 8 },
   code: { fontSize: 48, fontWeight: 900, letterSpacing: 10, background: 'linear-gradient(135deg, #FF3B5C, #9B5DE5)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', marginBottom: 12 },
-  copyBtn: { background: '#1A1A25', border: '1px solid #ffffff12', color: '#8888AA', borderRadius: 10, padding: '8px 20px', fontSize: 14, cursor: 'pointer', fontFamily: 'inherit' },
+  copyBtn: { background: '#111120', border: '1px solid #ffffff15', color: '#6A6A9A', borderRadius: 10, padding: '8px 20px', fontSize: 14, cursor: 'pointer', fontFamily: 'inherit' },
   section: { display: 'flex', flexDirection: 'column', gap: 10 },
-  sectionLabel: { fontSize: 14, color: '#8888AA', fontWeight: 600 },
+  sectionLabel: { fontSize: 14, color: '#6A6A9A', fontWeight: 700 },
+  levelRow: { display: 'flex', gap: 6, flexWrap: 'wrap' },
+  levelBtn: { flex: 1, minWidth: 56, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: '10px 6px', border: '1px solid', borderRadius: 12, cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.2s' },
+  levelDisplay: { background: '#0D0D14', borderRadius: 12, padding: '10px 14px', border: '1px solid #ffffff15' },
   playersList: { display: 'flex', flexDirection: 'column', gap: 8 },
-  playerCard: { display: 'flex', alignItems: 'center', gap: 12, background: '#13131A', borderRadius: 12, padding: '12px 14px', border: '1px solid #ffffff12' },
+  playerCard: { display: 'flex', alignItems: 'center', gap: 12, background: '#0D0D14', borderRadius: 12, padding: '12px 14px', border: '1px solid #ffffff15' },
   playerAvatar: { width: 42, height: 42, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 },
   playerInfo: { flex: 1, display: 'flex', flexDirection: 'column', gap: 4 },
-  playerName: { fontSize: 16, fontWeight: 700, color: '#F0F0FF' },
+  playerName: { fontSize: 16, fontWeight: 700, color: '#EEEEFF' },
   hostBadge: { fontSize: 11, color: '#FFD93D', background: '#FFD93D22', padding: '2px 8px', borderRadius: 6, alignSelf: 'flex-start' },
   readyBadge: { fontSize: 13, fontWeight: 600 },
   actions: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 'auto' },
   readyBtn: { borderRadius: 14, padding: '16px 24px', fontSize: 17, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' },
   startBtn: { background: 'linear-gradient(135deg, #FF3B5C, #9B5DE5)', color: '#fff', border: 'none', borderRadius: 14, padding: '16px 24px', fontSize: 17, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 8px 32px #FF3B5C44' },
-  waitingText: { textAlign: 'center', fontSize: 14, color: '#8888AA', animation: 'pulse 2s ease-in-out infinite' },
+  waitingText: { textAlign: 'center', fontSize: 14, color: '#6A6A9A', animation: 'pulse 2s ease-in-out infinite' },
 }
